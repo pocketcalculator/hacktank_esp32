@@ -41,3 +41,7 @@ compile_commands.json
 # =========================
 .DS_Store
 Thumbs.db
+
+# Large local/vendor artifacts
+waveshare_demo/
+ESP32-S3-LCD-1.28-Demo.zip
