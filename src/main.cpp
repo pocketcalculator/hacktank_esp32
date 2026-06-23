@@ -1,49 +1,50 @@
 #include <Arduino.h>
 #include <Adafruit_GC9A01A.h>
+#include "serial_cmd.h"
+#include "display_fsm.h"
+#include "display_anim.h"
+
+// Define FORCE_ALERT_ON_BOOT (e.g., add -D FORCE_ALERT_ON_BOOT to build_flags)
+// to boot straight into severity-3 ALERT for visual QA without a PC attached.
 
 namespace {
 constexpr int LCD_BL_VENDOR = 40;
-constexpr int LCD_BL_ALT = 2;
-constexpr int LCD_DC = 8;
-constexpr int LCD_CS = 9;
-constexpr int LCD_SCK = 10;
-constexpr int LCD_MOSI = 11;
-constexpr int LCD_RST = 12;
+constexpr int LCD_BL_ALT    = 2;
+constexpr int LCD_DC        = 8;
+constexpr int LCD_CS        = 9;
+constexpr int LCD_SCK       = 10;
+constexpr int LCD_MOSI      = 11;
+constexpr int LCD_RST       = 12;
 
 Adafruit_GC9A01A tft(LCD_CS, LCD_DC, LCD_MOSI, LCD_SCK, LCD_RST);
 }
 
 void setup() {
-  Serial.begin(115200);
-  delay(200);
+    Serial.begin(115200);
+    delay(200); // allow USB-CDC to enumerate (setup only, not loop)
 
-  pinMode(LCD_BL_VENDOR, OUTPUT);
-  pinMode(LCD_BL_ALT, OUTPUT);
-  digitalWrite(LCD_BL_VENDOR, HIGH);
-  digitalWrite(LCD_BL_ALT, HIGH);
+    pinMode(LCD_BL_VENDOR, OUTPUT);
+    pinMode(LCD_BL_ALT, OUTPUT);
+    digitalWrite(LCD_BL_VENDOR, HIGH);
+    digitalWrite(LCD_BL_ALT, HIGH);
 
-  tft.begin(40000000);
-  tft.setRotation(0);
-  tft.fillScreen(GC9A01A_BLACK);
-  tft.setTextColor(GC9A01A_WHITE);
-  tft.setTextSize(2);
+    tft.begin(40000000);
+    tft.setRotation(0);
+    tft.fillScreen(0x0000); // black
 
-  const char *msg = "Hi, Paul!";
-  int16_t x1, y1;
-  uint16_t w, h;
-  tft.getTextBounds(msg, 0, 0, &x1, &y1, &w, &h);
-  int16_t x = (240 - static_cast<int16_t>(w)) / 2;
-  int16_t y = (240 + static_cast<int16_t>(h)) / 2;
-  tft.setCursor(x, y);
-  tft.print(msg);
+    DisplayFSM::init();
+    DisplayAnim::init(tft);
 
-  Serial.println("Rendered Hi, Paul! on LCD");
+#ifdef FORCE_ALERT_ON_BOOT
+    DisplayFSM::on_bad(3);
+    Serial.println("LOG FORCE_ALERT_ON_BOOT sev=3");
+#endif
+
+    Serial.println("READY");
 }
 
 void loop() {
-  static uint32_t last = 0;
-  if (millis() - last >= 2000) {
-    last = millis();
-    Serial.printf("hello-screen alive ms=%lu\n", static_cast<unsigned long>(last));
-  }
+    SerialCmd::tick();
+    DisplayFSM::tick();
+    DisplayAnim::tick();
 }

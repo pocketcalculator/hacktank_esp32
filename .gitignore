@@ -45,3 +45,25 @@ Thumbs.db
 # Large local/vendor artifacts
 waveshare_demo/
 ESP32-S3-LCD-1.28-Demo.zip
+# Squad: ignore runtime state (logs, inbox, sessions)
+.squad/orchestration-log/
+.squad/log/
+.squad/decisions/inbox/
+.squad/sessions/
+.squad/.scratch/
+.squad/.cache/
+# Squad: SubSquad activation file (local to this machine)
+.squad-workstream
+
+# =========================
+# PC-side traffic monitor
+# =========================
+# Local API key config — NEVER commit secrets
+pc/.traffic_config
+# Python virtual environment
+pc/.venv/
+# Python cache
+pc/__pycache__/
+pc/*.pyc
+# Generated display simulator previews (regenerable artifacts)
+pc/preview/

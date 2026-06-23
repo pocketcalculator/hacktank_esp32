@@ -1,0 +1,13 @@
+# PC-side dependencies
+
+# Serial communication with the ESP32-S3 over USB
+pyserial>=3.5
+
+# HTTP client for TomTom Traffic Flow API
+requests>=2.28
+
+# Display simulator — image generation for export mode (required)
+pillow>=9.0
+
+# Display simulator — interactive live preview window (optional)
+# pip install pygame
