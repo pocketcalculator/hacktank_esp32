@@ -107,7 +107,7 @@ Run these from the project folder.
 ### Option A: Full executable path
 
 ```powershell
-Set-Location "C:\Users\paulsczurek\OneDrive - Microsoft\Documents\PlatformIO\Projects\initial_esp32_project"
+Set-Location <path-to-this-repo>
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" run -t upload --upload-port COM3
 & "$env:USERPROFILE\.platformio\penv\Scripts\platformio.exe" device monitor -b 115200 -p COM3
@@ -173,7 +173,7 @@ Then open a new terminal tab.
 Use these commands to publish your existing local `main` branch:
 
 ```powershell
-Set-Location "C:\Users\paulsczurek\OneDrive - Microsoft\Documents\PlatformIO\Projects\initial_esp32_project"
+Set-Location <path-to-this-repo>
 git remote add origin https://github.com/<your-username>/<new-repo>.git
 git push -u origin main
 ```

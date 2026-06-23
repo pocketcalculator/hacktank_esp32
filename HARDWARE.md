@@ -24,7 +24,7 @@ LCD GC9A01 (SPI)		1.28″ round IPS, 240×240, up to 80 MHz SPI
   CS	GPIO9	
   SCK	GPIO10	
   MOSI (SDA)	GPIO11	
-  RST	GPIO14	
+  RST	GPIO12	
 I²C bus (shared)		QMI8658 IMU lives here
   SDA	GPIO6	
   SCL	GPIO7	
