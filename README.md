@@ -20,8 +20,8 @@ This project targets the Waveshare ESP32-S3-LCD-1.28 board using PlatformIO + Ar
 Current known-good state:
 
 * Build and upload work over USB-UART (CH343 bridge)
-* LCD initializes and renders text on the onboard GC9A01 display
-* Serial heartbeat confirms the app is running continuously
+* LCD initializes and renders the traffic monitor states on the onboard GC9A01 display
+* USB serial protocol supports `READY`, `PING`/`PONG`, and traffic commands
 
 ## Hardware Target
 
@@ -68,8 +68,8 @@ Current behavior:
     * SCK = GPIO10
     * MOSI = GPIO11
     * RST = GPIO12
-* Draws centered text `Hi, Paul!`
-* Prints an alive heartbeat every 2 seconds
+* Initializes the traffic display finite-state machine and static car renderer
+* Prints `READY` on startup, accepts serial traffic commands, and redraws only when state/severity changes
 
 Why this matters:
 
@@ -97,7 +97,7 @@ High-level history of the key edits:
 3. Tested multiple display bring-up paths and kept the stable one in this project:
      * Adafruit GC9A01A driver
      * explicit SPI and control pin mapping
-4. Added and used serial heartbeat logs to separate display visibility issues from firmware crashes.
+4. Added serial traffic-command handling and a static car-state renderer.
 5. Validated hardware by flashing Waveshare factory image, then restored project firmware.
 
 ## Build and Upload Commands (Windows PowerShell)
@@ -163,7 +163,7 @@ Then open a new terminal tab.
 
 ### Display dark
 
-1. Verify serial heartbeat still prints.
+1. Verify the device prints `READY` after reset and responds `PONG` to `PING`.
 2. If firmware is alive but display is dark, test with a simple color-fill diagnostic.
 3. If needed, flash factory image to confirm hardware path:
     * Download from the Waveshare wiki firmware section for ESP32-S3-LCD-1.28

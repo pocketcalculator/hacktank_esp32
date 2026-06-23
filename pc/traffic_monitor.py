@@ -27,7 +27,9 @@ Serial contract: Dallas v1 (LOCKED — do not change without Dallas sign-off)
 
 import argparse
 import logging
+import logging.handlers
 import os
+import re
 import sys
 import threading
 import time
@@ -40,12 +42,74 @@ import serial.tools.list_ports
 # ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
-log = logging.getLogger("traffic_monitor")
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_FILE = LOG_DIR / "traffic_monitor.log"
+
+
+class RedactingFilter(logging.Filter):
+    """Redact TomTom API keys from fully-rendered log messages."""
+
+    KEY_QUERY_RE = re.compile(r"(?i)(key=)[^&\s]+")
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._api_key: str | None = None
+
+    def set_api_key(self, api_key: str | None) -> None:
+        self._api_key = api_key or None
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if self._api_key:
+            message = message.replace(self._api_key, "***REDACTED***")
+        message = self.KEY_QUERY_RE.sub(r"\1***REDACTED***", message)
+        record.msg = message
+        record.args = ()
+        return True
+
+
+_redacting_filter = RedactingFilter()
+
+
+def set_log_api_key(api_key: str | None) -> None:
+    _redacting_filter.set_api_key(api_key)
+
+
+def setup_logging() -> logging.Logger:
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+    logger = logging.getLogger("traffic_monitor")
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
+    logger.handlers.clear()
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)
+    console_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%H:%M:%S",
+    ))
+    console_handler.addFilter(_redacting_filter)
+
+    file_handler = logging.handlers.RotatingFileHandler(
+        LOG_FILE,
+        maxBytes=1_000_000,
+        backupCount=5,
+        encoding="utf-8",
+    )
+    file_handler.setLevel(logging.INFO)
+    file_handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    ))
+    file_handler.addFilter(_redacting_filter)
+
+    logger.addHandler(console_handler)
+    logger.addHandler(file_handler)
+    return logger
+
+
+log = setup_logging()
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -55,7 +119,12 @@ STARTUP_READY_TIMEOUT = 5       # seconds to wait for READY on connect
 PING_INTERVAL = 60              # heartbeat interval in seconds (Dallas: device STALE at 300s)
 DEFAULT_POLL_INTERVAL = 180     # traffic poll interval in seconds (3 minutes)
 SERIAL_READ_TIMEOUT = 2.0       # seconds per readline call
+SERIAL_RECONNECT_INITIAL_DELAY = 1.0
+SERIAL_RECONNECT_MAX_DELAY = 5.0
+SERIAL_RECONNECT_TOTAL_TIMEOUT = 300.0
 API_TIMEOUT = 10                # HTTP request timeout in seconds
+
+SERIAL_RECONNECT_LOCK = threading.Lock()
 
 # TomTom Traffic Flow Segment endpoint (zoom=10 gives ~1 km road segment)
 TOMTOM_FLOW_URL = (
@@ -231,6 +300,121 @@ def send_cmd(ser: serial.Serial, cmd: str, lock: threading.Lock) -> None:
     log.debug("→ %s", cmd.strip())
 
 
+def reopen_serial(
+    old_ser: serial.Serial | None,
+    port: str,
+    lock: threading.Lock,
+    stop_event: threading.Event | None = None,
+) -> serial.Serial | None:
+    """Close a bad handle and retry opening the port with bounded backoff."""
+    with lock:
+        if old_ser is not None:
+            try:
+                if old_ser.is_open:
+                    old_ser.close()
+            except Exception:
+                pass
+
+    deadline = time.monotonic() + SERIAL_RECONNECT_TOTAL_TIMEOUT
+    delay = SERIAL_RECONNECT_INITIAL_DELAY
+    while True:
+        try:
+            ser = serial.Serial(port, BAUD, timeout=SERIAL_READ_TIMEOUT)
+            log.info("Reconnected to %s.", port)
+            return ser
+        except (serial.SerialException, OSError, PermissionError) as exc:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                log.error(
+                    "Unable to reconnect to %s after %.0fs: %s",
+                    port,
+                    SERIAL_RECONNECT_TOTAL_TIMEOUT,
+                    exc,
+                )
+                return None
+            sleep_for = min(delay, SERIAL_RECONNECT_MAX_DELAY, remaining)
+            log.warning(
+                "Reconnect to %s failed: %s; retrying in %.1fs",
+                port,
+                exc,
+                sleep_for,
+            )
+            if stop_event is not None:
+                if stop_event.wait(timeout=sleep_for):
+                    return None
+            else:
+                time.sleep(sleep_for)
+            delay = min(delay * 2, SERIAL_RECONNECT_MAX_DELAY)
+
+
+def _replace_serial(
+    serial_ref: dict[str, serial.Serial],
+    old_ser: serial.Serial,
+    new_ser: serial.Serial,
+    lock: threading.Lock,
+) -> serial.Serial:
+    with lock:
+        if serial_ref["ser"] is old_ser:
+            serial_ref["ser"] = new_ser
+            return new_ser
+        current = serial_ref["ser"]
+    try:
+        new_ser.close()
+    except Exception:
+        pass
+    return current
+
+
+def _reconnect_serial(
+    serial_ref: dict[str, serial.Serial],
+    port: str,
+    lock: threading.Lock,
+    stop_event: threading.Event | None = None,
+    failed_ser: serial.Serial | None = None,
+) -> bool:
+    with SERIAL_RECONNECT_LOCK:
+        with lock:
+            old_ser = serial_ref["ser"]
+            if failed_ser is not None and old_ser is not failed_ser:
+                return True
+        log.warning("Serial connection lost — attempting to reconnect to %s...", port)
+        new_ser = reopen_serial(old_ser, port, lock, stop_event)
+        if new_ser is None:
+            return False
+        _replace_serial(serial_ref, old_ser, new_ser, lock)
+        return True
+
+
+def send_cmd_resilient(
+    serial_ref: dict[str, serial.Serial],
+    port: str,
+    cmd: str,
+    lock: threading.Lock,
+    stop_event: threading.Event | None = None,
+) -> bool:
+    """Send a command, reconnecting and retrying once on transient serial failure."""
+    for attempt in (1, 2):
+        with lock:
+            ser = serial_ref["ser"]
+        try:
+            send_cmd(ser, cmd, lock)
+            return True
+        except (serial.SerialException, OSError, PermissionError) as exc:
+            if attempt == 1:
+                log.warning(
+                    "Serial write failed — attempting to reconnect to %s: %s",
+                    port,
+                    exc,
+                )
+                if _reconnect_serial(serial_ref, port, lock, stop_event, ser):
+                    continue
+                log.warning("Skipping %r because serial reconnect did not complete", cmd)
+                return False
+            log.warning("Serial write failed after reconnect; skipping %r: %s", cmd, exc)
+            return False
+    return False
+
+
 def read_line(ser: serial.Serial) -> str | None:
     """
     Non-blocking read of one line from serial.
@@ -240,8 +424,34 @@ def read_line(ser: serial.Serial) -> str | None:
         raw = ser.readline()
         if raw:
             return raw.decode("ascii", errors="replace").strip()
-    except serial.SerialException:
+    except (serial.SerialException, OSError, PermissionError):
         pass
+    return None
+
+
+def read_line_resilient(
+    serial_ref: dict[str, serial.Serial],
+    port: str,
+    lock: threading.Lock,
+    stop_event: threading.Event | None = None,
+) -> str | None:
+    """Read one line, reconnecting on transient serial read failure."""
+    with lock:
+        ser = serial_ref["ser"]
+        try:
+            raw = ser.readline()
+        except (serial.SerialException, OSError, PermissionError) as exc:
+            log.warning(
+                "Serial read failed — attempting to reconnect to %s: %s",
+                port,
+                exc,
+            )
+            raw = None
+
+    if raw:
+        return raw.decode("ascii", errors="replace").strip()
+    if raw is None:
+        _reconnect_serial(serial_ref, port, lock, stop_event, ser)
     return None
 
 
@@ -290,19 +500,30 @@ class Heartbeat(threading.Thread):
     Dallas contract: device transitions STALE after 300s without any command.
     """
 
-    def __init__(self, ser: serial.Serial, lock: threading.Lock) -> None:
+    def __init__(
+        self,
+        serial_ref: dict[str, serial.Serial],
+        port: str,
+        lock: threading.Lock,
+    ) -> None:
         super().__init__(daemon=True, name="heartbeat")
-        self._ser = ser
+        self._serial_ref = serial_ref
+        self._port = port
         self._lock = lock
         self._stop_event = threading.Event()
 
     def run(self) -> None:
         while not self._stop_event.wait(timeout=PING_INTERVAL):
-            try:
-                send_cmd(self._ser, "PING", self._lock)
+            if send_cmd_resilient(
+                self._serial_ref,
+                self._port,
+                "PING",
+                self._lock,
+                self._stop_event,
+            ):
                 log.debug("Heartbeat PING sent")
-            except Exception as exc:
-                log.warning("Heartbeat PING failed: %s", exc)
+            else:
+                log.warning("Heartbeat PING skipped; serial is not currently available")
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -350,6 +571,7 @@ def run_test(ser: serial.Serial, lock: threading.Lock, mode: str) -> None:
 # ---------------------------------------------------------------------------
 def monitor_loop(
     ser: serial.Serial,
+    port: str,
     lock: threading.Lock,
     lat: float,
     lon: float,
@@ -366,13 +588,14 @@ def monitor_loop(
     """
     last_state: str | None = None   # "bad_1"|"bad_2"|"bad_3"|"clear"|None
     next_poll = time.monotonic()    # poll immediately on first iteration
+    serial_ref = {"ser": ser}
 
     log.info(
         "Monitor running — lat=%.2f lon=%.2f interval=%ds  (Ctrl+C to stop)",
         lat, lon, interval,
     )
 
-    heartbeat = Heartbeat(ser, lock)
+    heartbeat = Heartbeat(serial_ref, port, lock)
     heartbeat.start()
 
     try:
@@ -380,7 +603,7 @@ def monitor_loop(
             now = time.monotonic()
 
             # Drain incoming serial lines (non-blocking window = SERIAL_READ_TIMEOUT)
-            line = read_line(ser)
+            line = read_line_resilient(serial_ref, port, lock)
             if line:
                 log.info("← %s", line)
 
@@ -414,8 +637,10 @@ def monitor_loop(
                     else:
                         log.info("State unchanged (%s) — periodic refresh '%s'", new_state, cmd)
 
-                    send_cmd(ser, cmd, lock)
-                    last_state = new_state
+                    if send_cmd_resilient(serial_ref, port, cmd, lock):
+                        last_state = new_state
+                    else:
+                        log.warning("Traffic command not sent; will retry on next poll")
 
             time.sleep(0.5)
 
@@ -423,8 +648,10 @@ def monitor_loop(
         log.info("Interrupted by user — shutting down")
     finally:
         heartbeat.stop()
+        heartbeat.join(timeout=SERIAL_RECONNECT_MAX_DELAY + 1.0)
         try:
-            ser.close()
+            with lock:
+                serial_ref["ser"].close()
         except Exception:
             pass
         log.info("Serial port closed. Bye.")
@@ -535,6 +762,7 @@ def main(argv=None) -> None:
                 "  TOMTOM_API_KEY=yourkey\n"
                 "Get a free key at https://developer.tomtom.com/\n"
             )
+        set_log_api_key(api_key)
 
     # Open serial port
     ser = open_serial(args.port)
@@ -546,7 +774,7 @@ def main(argv=None) -> None:
         return
 
     wait_for_ready(ser, lock)
-    monitor_loop(ser, lock, lat, lon, api_key, args.interval)
+    monitor_loop(ser, args.port, lock, lat, lon, api_key, args.interval)
 
 
 if __name__ == "__main__":

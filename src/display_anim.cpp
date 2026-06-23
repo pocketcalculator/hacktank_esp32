@@ -1,18 +1,16 @@
-// display_anim.cpp — Non-blocking animations for the 240×240 GC9A01A round display.
+// display_anim.cpp — Static state renderer for the 240×240 GC9A01A round display.
 //
-// Timing budget per tick call: the ~5 ms guideline is met for IDLE and STALE.
-// ALERT draws one car silhouette (~6-10 ms for sz 70-90) but fires only at its
-// pulse cadence (every 125–500 ms depending on severity), keeping average load low.
+// DisplayAnim::tick() may be called every loop(), but it only renders when the
+// displayed state or alert severity changes. Otherwise it leaves existing pixels
+// untouched to avoid visible redraw flicker.
 //
-// State/animation summary:
-//   IDLE  — slow breathing teal car silhouette (sz=65), period 3 s, update every 50 ms.
-//   ALERT — bold pulsing: bright → dim colour alternation at [1 Hz / 2 Hz / 4 Hz]
-//            for severity [1 / 2 / 3]. Size grows with severity (sz 70/80/90).
-//            sev 1: red pulse. sev 2: orange-red pulse. sev 3: red↔yellow strobe.
-//   STALE — very dim slow blue-grey pulse (sz=40), period 4 s, update every 200 ms.
+// State summary:
+//   IDLE  — static teal car silhouette (sz=115).
+//   ALERT — static high-visibility car; size grows with severity (sz 109/112/115).
+//   STALE — static dim blue-grey car silhouette (sz=115).
 //
 // Shape: detailed side-view car (draw_car helper). Draw order per frame:
-//   body (state color, pulsing) → wheels (fixed dark tyre + mid-grey hub) → windows (fixed glass)
+//   body (state color) → wheels (fixed dark tyre + mid-grey hub) → windows (fixed glass)
 //   Base design at sz=90: 176×88 px, centred on (120,120).
 //   Body hull   : cx±88, cy-12 to cy+26  (fillRoundRect, h=38)
 //   Cabin rect  : cx±44, cy-44 to cy-12  (fillRect, h=32)
@@ -43,9 +41,8 @@ static inline uint16_t rgb565(uint8_t r, uint8_t g, uint8_t b) {
 // Fixed detail colors — non-pulsing, drawn on top of the state-color body
 // ---------------------------------------------------------------------------
 
-// Glass / windows: light ice-blue — contrasts against all five body colors
-// (bright red/orange/yellow in alert bright phases, teal in idle, and dim
-// dark-red/blue-grey in dim/stale phases) via luminance contrast.
+// Glass / windows: light ice-blue — contrasts against the alert colors, teal
+// idle body, and dim stale body via luminance contrast.
 // RGB (160,200,224) → rgb565 = 0xA65C
 static const uint16_t COL_GLASS = 0xA65C;
 
@@ -54,6 +51,10 @@ static const uint16_t COL_TIRE  = 0x18C3;
 
 // Hub / rim: mid grey  RGB (128,128,128) → rgb565 = 0x8410
 static const uint16_t COL_HUB   = 0x8410;
+
+static const int16_t DISPLAY_CX = 120;
+static const int16_t DISPLAY_CY = 120;
+static const uint8_t CAR_SZ_FULL_WIDTH = 115;  // 224 px wide: x=8..232 on a 240 px panel
 
 // ---------------------------------------------------------------------------
 // Car silhouette helper
@@ -84,7 +85,7 @@ static void draw_car(int16_t cx, int16_t cy, uint8_t sz, uint16_t color) {
     int16_t wp      = SC(3);                    // centre-pillar half-width
 #undef SC
 
-    // ── Body (state color, pulsing) ──────────────────────────────────────────
+    // ── Body (state color) ───────────────────────────────────────────────────
     s_tft->fillRoundRect(cx - bx,  cy - by_,  bx * 2, bh, br, color);
     s_tft->fillRect(cx - cdx, cy - cdy, cdx * 2, ch, color);
     s_tft->fillTriangle(cx - bx,  cy - by_,
@@ -114,90 +115,31 @@ static void draw_car(int16_t cx, int16_t cy, uint8_t sz, uint16_t color) {
 }
 
 // ---------------------------------------------------------------------------
-// Triangle-wave brightness
+// Per-state render helpers (static, module-private)
 // ---------------------------------------------------------------------------
 
-// Triangle-wave brightness: returns 0–255 over `period_ms`, low→high→low.
-static uint8_t breathe(uint32_t now, uint32_t period_ms, uint8_t lo, uint8_t hi) {
-    uint32_t phase = now % period_ms;
-    uint32_t half  = period_ms >> 1;
-    uint32_t range = hi - lo;
-    if (phase < half) {
-        return (uint8_t)(lo + phase * range / half);
-    } else {
-        return (uint8_t)(hi - (phase - half) * range / half);
-    }
+static void render_idle() {
+    uint16_t color = rgb565(0, 160, 200);
+    draw_car(DISPLAY_CX, DISPLAY_CY, CAR_SZ_FULL_WIDTH, color);
 }
 
-// ---------------------------------------------------------------------------
-// Per-state tick helpers (static, module-private)
-// ---------------------------------------------------------------------------
-
-static void tick_idle(uint32_t now, bool fresh) {
-    static uint32_t last_ms = 0;
-
-    if (fresh) {
-        s_tft->fillScreen(0x0000);  // black
-        last_ms = 0;
-    }
-    if (now - last_ms < 50) return;  // ~20 fps for IDLE
-    last_ms = now;
-
-    // Breathing teal (R=0, G=0..160, B=0..200) — overwrite same-size car silhouette.
-    uint8_t b = breathe(now, 3000, 30, 200);
-    uint16_t color = rgb565(0, (uint8_t)(b * 4 / 5), b);
-    draw_car(120, 120, 65, color);
-}
-
-static void tick_alert(uint32_t now, uint8_t sev, bool fresh) {
-    // Per-severity pulse half-periods (ms) and radii.
-    static const uint16_t HALF_MS[4] = {0, 500, 250, 125}; // [sev 1/2/3]
-    static const uint8_t  RADII[4]   = {0,  70,  80,  90};
-
-    static uint32_t last_ms = 0;
-    static bool     bright  = true;
+static void render_alert(uint8_t sev) {
+    static const uint8_t RADII[4] = {0, 109, 112, 115};
 
     if (sev < 1) sev = 1;
     if (sev > 3) sev = 3;
 
-    if (fresh) {
-        s_tft->fillScreen(0x0000);
-        last_ms = 0;
-        bright  = true; // always start with the bright phase for maximum impact
-    }
-
-    if (now - last_ms < HALF_MS[sev]) return;
-    last_ms = now;
-
     uint16_t color;
-    if (bright) {
-        if      (sev == 1) color = rgb565(220,  30,   0);  // vivid red
-        else if (sev == 2) color = rgb565(255,  90,   0);  // hot orange-red
-        else               color = rgb565(255, 220,   0);  // alarm yellow
-    } else {
-        if      (sev == 1) color = rgb565( 55,   0,   0);  // dark red
-        else if (sev == 2) color = rgb565( 70,  15,   0);  // dark orange
-        else               color = rgb565(180,   0,   0);  // medium red (yellow↔red strobe)
-    }
+    if      (sev == 1) color = rgb565(220,  30,   0);  // vivid red
+    else if (sev == 2) color = rgb565(255,  90,   0);  // hot orange-red
+    else               color = rgb565(255, 180,   0);  // steady amber
 
-    draw_car(120, 120, RADII[sev], color);
-    bright = !bright;
+    draw_car(DISPLAY_CX, DISPLAY_CY, RADII[sev], color);
 }
 
-static void tick_stale(uint32_t now, bool fresh) {
-    static uint32_t last_ms = 0;
-
-    if (fresh) {
-        s_tft->fillScreen(0x0000);
-        last_ms = 0;
-    }
-    if (now - last_ms < 200) return;  // ~5 fps for STALE
-    last_ms = now;
-
-    // Very dim blue-grey: R=b/4, G=b/4, B=b — max brightness ~55.
-    uint8_t b = breathe(now, 4000, 12, 55);
-    uint16_t color = rgb565((uint8_t)(b / 4), (uint8_t)(b / 4), b);
-    draw_car(120, 120, 40, color);
+static void render_stale() {
+    uint16_t color = rgb565(13, 13, 55);
+    draw_car(DISPLAY_CX, DISPLAY_CY, CAR_SZ_FULL_WIDTH, color);
 }
 
 // ---------------------------------------------------------------------------
@@ -216,20 +158,20 @@ void tick() {
     static DisplayState prev_state = (DisplayState)0xFF;
     static uint8_t      prev_sev   = 0xFF;
 
-    uint32_t     now   = millis();
     DisplayState state = DisplayFSM::get_state();
     uint8_t      sev   = DisplayFSM::get_severity();
 
-    bool fresh = (state != prev_state || sev != prev_sev);
-    if (fresh) {
-        prev_state = state;
-        prev_sev   = sev;
-    }
+    if (state == prev_state && sev == prev_sev) return;
+
+    prev_state = state;
+    prev_sev   = sev;
+
+    s_tft->fillScreen(0x0000);
 
     switch (state) {
-        case DisplayState::IDLE:  tick_idle(now, fresh);        break;
-        case DisplayState::ALERT: tick_alert(now, sev, fresh);  break;
-        case DisplayState::STALE: tick_stale(now, fresh);       break;
+        case DisplayState::IDLE:  render_idle();        break;
+        case DisplayState::ALERT: render_alert(sev);    break;
+        case DisplayState::STALE: render_stale();       break;
     }
 }
 

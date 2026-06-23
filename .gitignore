@@ -60,6 +60,8 @@ ESP32-S3-LCD-1.28-Demo.zip
 # =========================
 # Local API key config — NEVER commit secrets
 pc/.traffic_config
+# Runtime monitor logs — may contain location/operational data
+pc/logs/
 # Python virtual environment
 pc/.venv/
 # Python cache

@@ -7,10 +7,9 @@ ESP32-S3 display over USB serial.
 
 ## Display Simulator — `display_sim.py`
 
-A faithful PC-side renderer of the five round-display visual states.
-Colors, radii, periods, and frame rates are sourced directly from
-`src/display_anim.cpp` — the live preview and exported images are
-**pixel-identical** to the firmware's output.
+A PC-side renderer of the five static round-display visual states. Colors,
+radii, and geometry are mirrored from `src/display_anim.cpp`, so the live
+preview and exported images are close visual references for the firmware output.
 
 ### Quick start
 
@@ -31,11 +30,11 @@ python pc\display_sim.py --state alert2
 
 | Key | State |
 |-----|-------|
-| `0` | IDLE — slow breathing teal circle |
-| `1` | ALERT severity 1 — deep red pulse, 1 Hz |
-| `2` | ALERT severity 2 — hot orange-red pulse, 2 Hz |
-| `3` | ALERT severity 3 — yellow ↔ red strobe, 4 Hz |
-| `s` | STALE — very dim blue-grey slow breathe |
+| `0` | IDLE — static teal car |
+| `1` | ALERT severity 1 — static vivid red car |
+| `2` | ALERT severity 2 — static hot orange-red car |
+| `3` | ALERT severity 3 — static amber car |
+| `s` | STALE — static dim blue-grey car |
 | `Esc` / `q` | Quit |
 
 The window title shows the active state name; no text is drawn over the
@@ -47,9 +46,9 @@ Writes the following files to the given directory (created if absent):
 
 | File | Contents |
 |------|----------|
-| `idle.gif` / `alert1.gif` … `stale.gif` | Animated GIF, one full animation cycle at firmware frame rate |
-| `idle.png` / `alert1.png` … `stale.png` | Filmstrip montage — 6 frames across one cycle, timestamps labelled |
-| `overview.png` | All five states side-by-side at peak brightness for quick comparison |
+| `idle.gif` / `alert1.gif` … `stale.gif` | Static GIF preview for compatibility |
+| `idle.png` / `alert1.png` … `stale.png` | Static filmstrip montage preview |
+| `overview.png` | All five static states side-by-side for quick comparison |
 
 The `pc/preview/` directory is listed in `.gitignore` (regenerable artifacts).
 
@@ -133,6 +132,14 @@ python -m serial.tools.list_ports
 
 ## Running the monitor
 
+### Prerequisites checklist
+
+- TomTom app has the **Traffic** API product enabled, and `TOMTOM_API_KEY` is set
+  in your environment or in `pc\.traffic_config`
+- Python dependencies are installed with `pip install -r pc\requirements.txt`
+- Traffic-display firmware is flashed to the ESP32-S3
+- The ESP32-S3 is connected over USB and you know its COM port
+
 ```powershell
 # Activate venv if using one
 pc\.venv\Scripts\activate
@@ -143,19 +150,32 @@ python pc\traffic_monitor.py --port COM3 --lat 40.7128 --lon -74.0060
 # Alternative: --location shorthand
 python pc\traffic_monitor.py --port COM3 --location 40.7128,-74.0060
 
-# Faster poll interval for testing (60 seconds instead of 3 minutes)
-python pc\traffic_monitor.py --port COM3 --lat 40.7128 --lon -74.0060 --interval 60
+# Slower poll interval: 300 seconds / 5 minutes instead of the 180-second default
+python pc\traffic_monitor.py --port COM3 --lat 40.7128 --lon -74.0060 --interval 300
 ```
+
+At startup, the monitor opens the serial port at 115200 baud and waits up to
+5 seconds for `READY`. If `READY` is not seen, it sends `PING` and waits up to
+another 5 seconds for `PONG`; if neither response arrives, it logs a warning
+and continues so you can still diagnose the port/firmware. During normal mode,
+it polls TomTom every 180 seconds by default (`--interval SECONDS` changes this)
+and sends a heartbeat `PING` every 60 seconds so the device does not enter
+`STALE` between traffic polls.
+
+The monitor also writes an INFO-and-above rotating log to
+`pc\logs\traffic_monitor.log` for persistent diagnostics. That directory is
+gitignored, and TomTom API keys are scrubbed from all console and file log
+output.
 
 **Options:**
 
 | Flag | Default | Description |
 |------|---------|-------------|
 | `--port` | *(required)* | COM port, e.g. `COM3` |
-| `--lat` / `--lon` | *(required)* | Latitude/longitude of your location |
-| `--location LAT,LON` | — | Alternative to `--lat`/`--lon` |
+| `--lat` / `--lon` | *(required in normal mode)* | Latitude/longitude of your location |
+| `--location LAT,LON` | — | Alternative to `--lat`/`--lon` in normal mode |
 | `--interval SECONDS` | 180 | Traffic poll interval (3 min default) |
-| `--test {bad\|clear}` | — | Manual QA mode (see below) |
+| `--test {bad\|clear}` | — | Manual QA mode (see below); no API key or location required |
 
 ---
 
@@ -165,7 +185,7 @@ Test the serial link without a live traffic API. Sends one real command
 through the serial path and waits for an ACK:
 
 ```powershell
-# Trigger the "bad traffic" alert animation (severity 2)
+# Trigger the "bad traffic" alert display (severity 2)
 python pc\traffic_monitor.py --port COM3 --test bad
 
 # Return to calm idle
@@ -182,7 +202,7 @@ To run the monitor automatically at startup (or on a schedule):
 
 1. Open **Task Scheduler** (search in Start menu)
 2. **Create Basic Task** → give it a name, e.g. "Traffic Monitor"
-3. **Trigger:** "When the computer starts" (or "On a schedule" → every 3 minutes)
+3. **Trigger:** "When the computer starts"
 4. **Action:** "Start a program"
    - **Program:** `C:\path\to\repo\pc\.venv\Scripts\python.exe`
    - **Arguments:** `C:\path\to\repo\pc\traffic_monitor.py --port COM3 --lat 40.7128 --lon -74.0060`
@@ -206,6 +226,32 @@ picks it up without extra configuration.
 | < 0.35 | bad | 3 | Gridlock |
 
 *ratio = currentSpeed / freeFlowSpeed from TomTom API*
+
+---
+
+## Traffic conditions → car color
+
+The monitor queries TomTom Traffic Flow `flowSegmentData`, computes
+`currentSpeed / freeFlowSpeed`, and sends one serial command for the matching
+traffic state. The firmware renders a static car: there is no animation, pulse,
+flash, or brightness breathing, and it redraws only when the display
+state/severity changes.
+
+![Overview of the five static car color states: idle teal, alert severity 1 vivid red, alert severity 2 hot orange-red, alert severity 3 amber, and stale dim blue-grey.](docs/images/traffic-states-overview.png)
+
+The car body colors below are sourced from `src\display_anim.cpp`. The RGB
+column lists the source RGB values passed to the firmware `rgb565()` helper;
+the RGB565 column is the actual packed display color. The full-width car is
+about 224 px wide on the 240 px display (roughly 8 px side margins) for idle,
+severity 3, and stale; lower alert severities are slightly smaller.
+
+| Traffic condition | Status / severity | Serial command sent | Car color shown |
+|-------------------|-------------------|---------------------|-----------------|
+| `currentSpeed / freeFlowSpeed >= 0.85` | clear / idle | `TRAFFIC OK` | teal — RGB `(0, 160, 200)`, RGB565 `0x0519` |
+| `0.60 <= currentSpeed / freeFlowSpeed < 0.85` | alert severity 1 | `TRAFFIC BAD` | vivid red — RGB `(220, 30, 0)`, RGB565 `0xD8E0` |
+| `0.35 <= currentSpeed / freeFlowSpeed < 0.60` | alert severity 2 | `TRAFFIC BAD 2` | hot orange-red — RGB `(255, 90, 0)`, RGB565 `0xFAC0` |
+| `currentSpeed / freeFlowSpeed < 0.35` | alert severity 3 | `TRAFFIC BAD 3` | steady amber — RGB `(255, 180, 0)`, RGB565 `0xFDA0` |
+| PC link lost — no `TRAFFIC` or `PING` for 5 min | stale | none; device timeout state | dim blue-grey — RGB `(13, 13, 55)`, RGB565 `0x0866` |
 
 ---
 

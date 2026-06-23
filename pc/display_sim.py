@@ -2,8 +2,8 @@
 """
 display_sim.py — PC-side simulator for the HackTank ESP32 round display (240×240 GC9A01A).
 
-Faithfully reproduces all five visual states from display_anim.cpp using the EXACT
-firmware constants for colors, radii, periods, and frame rates.  A single render_frame()
+Faithfully reproduces all five static visual states from display_anim.cpp using
+the EXACT firmware constants for colors and radii. A single render_frame()
 function drives both interactive (pygame) and headless (Pillow export) modes.
 
 Usage
@@ -21,7 +21,6 @@ Headless export  (Pillow only, works anywhere — no display required):
 import sys
 import os
 import argparse
-import time
 
 # ---------------------------------------------------------------------------
 # Pillow (required)
@@ -45,35 +44,20 @@ DISPLAY_W = 240
 DISPLAY_H = 240
 CX, CY = 120, 120                       # display center (pixels)
 
-# IDLE — slow breathing teal circle
-IDLE_RADIUS      = 65                   # fillCircle radius
-IDLE_PERIOD_MS   = 3000                 # breathe() period
-IDLE_BREATHE_LO  = 30                   # brightness lo
-IDLE_BREATHE_HI  = 200                  # brightness hi
-IDLE_TICK_MS     = 50                   # ~20 fps update interval
+# IDLE — static teal car
+IDLE_RADIUS      = 115                  # draw_car size: 224 px wide (x=8..232)
+IDLE_COLOR       = (0, 160, 200)
 
-# ALERT — binary pulse; indexed by severity [0 unused / 1 / 2 / 3]
-ALERT_HALF_MS = [0, 500, 250, 125]      # ms per phase → 1 Hz / 2 Hz / 4 Hz
-ALERT_RADII   = [0,  70,  80,  90]      # fillCircle radius per severity
-
-# Bright phase colours (R, G, B) — pre-quantization
-ALERT_BRIGHT  = [None,
+# ALERT — static fixed colors; indexed by severity [0 unused / 1 / 2 / 3]
+ALERT_RADII   = [0, 109, 112, 115]      # draw_car size per severity: ~212/218/224 px wide
+ALERT_COLORS  = [None,
                  (220,  30,   0),       # sev 1 — vivid red
                  (255,  90,   0),       # sev 2 — hot orange-red
-                 (255, 220,   0)]       # sev 3 — alarm yellow
+                 (255, 180,   0)]       # sev 3 — steady amber
 
-# Dim phase colours
-ALERT_DIM     = [None,
-                 ( 55,   0,   0),       # sev 1 — dark red
-                 ( 70,  15,   0),       # sev 2 — dark orange
-                 (180,   0,   0)]       # sev 3 — medium red (yellow ↔ red strobe)
-
-# STALE — very dim blue-grey slow breathe
-STALE_RADIUS     = 40
-STALE_PERIOD_MS  = 4000
-STALE_BREATHE_LO = 12
-STALE_BREATHE_HI = 55
-STALE_TICK_MS    = 200                  # ~5 fps update interval
+# STALE — static dim blue-grey
+STALE_RADIUS     = 115
+STALE_COLOR      = (13, 13, 55)
 
 # ---------------------------------------------------------------------------
 # Fixed detail colors — non-pulsing, identical to firmware COL_* constants
@@ -100,21 +84,6 @@ def rgb565_quantize(r: int, g: int, b: int) -> tuple:
     return (r & 0xF8, g & 0xFC, b & 0xF8)
 
 
-def breathe(t_ms, period_ms: int, lo: int, hi: int) -> int:
-    """
-    Triangle-wave brightness — direct translation of firmware breathe().
-    Returns integer in [lo, hi].
-    """
-    t_ms   = int(t_ms)
-    phase  = t_ms % period_ms
-    half   = period_ms >> 1          # same as period_ms // 2
-    rng    = hi - lo
-    if phase < half:
-        return lo + phase * rng // half
-    else:
-        return hi - (phase - half) * rng // half
-
-
 def _draw_car(draw: "ImageDraw.Draw", cx: int, cy: int, sz: int, color: tuple) -> None:
     """
     Draw a detailed side-view car centred at (cx, cy).
@@ -123,7 +92,7 @@ def _draw_car(draw: "ImageDraw.Draw", cx: int, cy: int, sz: int, color: tuple) -
     Base design (sz=90): 176 × 88 px, centred on (cx, cy).
 
     Draw order per frame:
-      1. Body shape (state color, pulsing)
+      1. Body shape (state color)
       2. Wheels: dark tyre outer ellipse + lighter hub ellipse (fixed TIRE/HUB_COLOR)
       3. Windows: front + rear panes inset inside cabin (fixed GLASS_COLOR)
     """
@@ -141,7 +110,7 @@ def _draw_car(draw: "ImageDraw.Draw", cx: int, cy: int, sz: int, color: tuple) -
     wi_bot  = sc(3)
     wp      = sc(3)                  # centre-pillar half-width
 
-    # ── Body (state color, pulsing) ──────────────────────────────────────────
+    # ── Body (state color) ───────────────────────────────────────────────────
     # Lower body hull
     draw.rectangle([cx - bx, cy - by_, cx + bx, cy - by_ + bh], fill=color)
     # Upper cabin rect
@@ -208,24 +177,18 @@ def render_frame(state: str, sev: int, t_ms: float) -> Image.Image:
     d   = ImageDraw.Draw(img)
 
     if state == "idle":
-        b     = breathe(t_ms, IDLE_PERIOD_MS, IDLE_BREATHE_LO, IDLE_BREATHE_HI)
-        color = rgb565_quantize(0, b * 4 // 5, b)          # teal: R=0, G=b*4/5, B=b
+        color = rgb565_quantize(*IDLE_COLOR)
         r     = IDLE_RADIUS
         _draw_car(d, CX, CY, r, color)
 
     elif state == "alert":
         sev     = max(1, min(3, int(sev)))
-        full_ms = ALERT_HALF_MS[sev] * 2
-        phase   = int(t_ms) % full_ms
-        bright  = phase < ALERT_HALF_MS[sev]
-        raw     = ALERT_BRIGHT[sev] if bright else ALERT_DIM[sev]
-        color   = rgb565_quantize(*raw)
+        color   = rgb565_quantize(*ALERT_COLORS[sev])
         r       = ALERT_RADII[sev]
         _draw_car(d, CX, CY, r, color)
 
     elif state == "stale":
-        b     = breathe(t_ms, STALE_PERIOD_MS, STALE_BREATHE_LO, STALE_BREATHE_HI)
-        color = rgb565_quantize(b // 4, b // 4, b)         # blue-grey: R=b/4, G=b/4, B=b
+        color = rgb565_quantize(*STALE_COLOR)
         r     = STALE_RADIUS
         _draw_car(d, CX, CY, r, color)
 
@@ -237,14 +200,9 @@ def render_frame(state: str, sev: int, t_ms: float) -> Image.Image:
 # ---------------------------------------------------------------------------
 
 def _cycle_and_tick(state: str, sev: int) -> tuple:
-    """Return (cycle_ms, tick_ms) matching the firmware's natural update rate."""
-    if state == "idle":
-        return IDLE_PERIOD_MS, IDLE_TICK_MS
-    elif state == "alert":
-        sev = max(1, min(3, sev))
-        return ALERT_HALF_MS[sev] * 2, ALERT_HALF_MS[sev]  # one frame per phase
-    elif state == "stale":
-        return STALE_PERIOD_MS, STALE_TICK_MS
+    """Return a single static-frame cadence for export compatibility."""
+    if state in ("idle", "alert", "stale"):
+        return 1000, 1000
     raise ValueError(f"Unknown state: {state!r}")
 
 
@@ -265,16 +223,14 @@ def _draw_centered_text(draw, font, text: str, cx: int, y: int, color):
     draw.text((cx - w // 2, y), text, fill=color, font=font)
 
 
-# ── Animated GIF ─────────────────────────────────────────────────────────────
+# ── Static GIF ───────────────────────────────────────────────────────────────
 
 def _merge_duplicate_frames(frames, tick_ms: int):
     """
     Merge consecutive identical frames, summing their durations.
 
-    RGB-565 quantization can collapse many adjacent breathe frames to the same
-    pixel values.  If PIL deduplicates without adjusting durations, the GIF
-    total time would be too short.  By merging here we guarantee the correct
-    cycle length regardless of PIL version.
+    Static exports intentionally produce duplicate frames for compatibility with
+    the existing GIF path. Merge them so the output remains a single still image.
 
     Returns (unique_frames_rgb, duration_list_ms).
     """
@@ -290,7 +246,7 @@ def _merge_duplicate_frames(frames, tick_ms: int):
 
 
 def export_gif(state: str, sev: int, path: str):
-    """Export an animated GIF covering one complete animation cycle."""
+    """Export a static GIF preview."""
     cycle_ms, tick_ms = _cycle_and_tick(state, sev)
     n_frames = max(2, cycle_ms // tick_ms)
     frames   = [render_frame(state, sev, i * tick_ms) for i in range(n_frames)]
@@ -313,9 +269,9 @@ def export_gif(state: str, sev: int, path: str):
 
 _STATE_LABELS = {
     ("idle",  0): "IDLE",
-    ("alert", 1): "ALERT sev 1  (1 Hz)",
-    ("alert", 2): "ALERT sev 2  (2 Hz)",
-    ("alert", 3): "ALERT sev 3  (4 Hz)",
+    ("alert", 1): "ALERT sev 1",
+    ("alert", 2): "ALERT sev 2",
+    ("alert", 3): "ALERT sev 3",
     ("stale", 0): "STALE",
 }
 
@@ -371,13 +327,13 @@ def export_overview(path: str):
     Export overview.png — one representative peak-brightness frame per state,
     all five states in a single row with labels.
     """
-    # (state, sev, t_ms_for_bright_frame, label)
+    # (state, sev, t_ms_ignored_for_static_frame, label)
     representative = [
-        ("idle",  0, 1500, "IDLE"),          # t=1500 → peak of triangle wave
-        ("alert", 1,  250, "ALERT sev1"),    # t=250  → safely in bright phase
-        ("alert", 2,  125, "ALERT sev2"),
-        ("alert", 3,   62, "ALERT sev3"),
-        ("stale", 0, 2000, "STALE"),         # t=2000 → peak of triangle wave
+        ("idle",  0,    0, "IDLE"),
+        ("alert", 1,    0, "ALERT sev1"),
+        ("alert", 2,    0, "ALERT sev2"),
+        ("alert", 3,    0, "ALERT sev3"),
+        ("stale", 0,    0, "STALE"),
     ]
 
     n        = len(representative)
@@ -477,12 +433,10 @@ def run_live(initial_state: str = "idle", initial_sev: int = 1):
 
     update_title()
     clock = pygame.time.Clock()
-    start = time.monotonic()
+    redraw_needed = True
 
     running = True
     while running:
-        t_ms = (time.monotonic() - start) * 1000.0
-
         for event in pygame.event.get():
             if event.type == pygame.QUIT:
                 running = False
@@ -490,22 +444,25 @@ def run_live(initial_state: str = "idle", initial_sev: int = 1):
                 if event.key in (pygame.K_ESCAPE, pygame.K_q):
                     running = False
                 elif event.key == pygame.K_0:
-                    state, sev = "idle", 0;   update_title()
+                    state, sev = "idle", 0;   update_title(); redraw_needed = True
                 elif event.key == pygame.K_1:
-                    state, sev = "alert", 1;  update_title()
+                    state, sev = "alert", 1;  update_title(); redraw_needed = True
                 elif event.key == pygame.K_2:
-                    state, sev = "alert", 2;  update_title()
+                    state, sev = "alert", 2;  update_title(); redraw_needed = True
                 elif event.key == pygame.K_3:
-                    state, sev = "alert", 3;  update_title()
+                    state, sev = "alert", 3;  update_title(); redraw_needed = True
                 elif event.key in (pygame.K_s, pygame.K_S):
-                    state, sev = "stale", 0;  update_title()
+                    state, sev = "stale", 0;  update_title(); redraw_needed = True
 
-        frame     = render_frame(state, sev, t_ms)
-        frame_big = frame.resize((WIN_W, WIN_H), Image.NEAREST)
-        surf      = pygame.image.fromstring(frame_big.tobytes(), (WIN_W, WIN_H), "RGB")
-        screen.blit(surf, (0, 0))
-        pygame.display.flip()
-        clock.tick(30)          # cap at 30 fps; render_frame is cheap
+        if redraw_needed:
+            frame     = render_frame(state, sev, 0)
+            frame_big = frame.resize((WIN_W, WIN_H), Image.NEAREST)
+            surf      = pygame.image.fromstring(frame_big.tobytes(), (WIN_W, WIN_H), "RGB")
+            screen.blit(surf, (0, 0))
+            pygame.display.flip()
+            redraw_needed = False
+
+        clock.tick(30)
 
     pygame.quit()
 
